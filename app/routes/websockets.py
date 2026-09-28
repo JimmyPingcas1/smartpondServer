@@ -9,11 +9,14 @@ from fastapi import (
 from ..db import (
     Control_collection,
     pond_collection,
+    user_collection,
 )
  
 from ..time_utils import app_now
+from ..helpers.userHelper import safe_object_id
 from ..middleware.authMiddleware import get_user_id_from_token
 from ..providers.SmsProvider import send_device_offline_sms
+from websockets.exceptions import ConnectionClosedError
 
 router = APIRouter()
 
@@ -209,6 +212,89 @@ def create_sensor_message(
     }
 
 
+async def mark_esp32_offline(user_id: str, pond_id: str) -> None:
+    """
+    Transition pond device_status from 'online' -> 'offline'.
+
+    Only fires the offline SMS when an actual ONLINE -> OFFLINE
+    transition happened (modified_count == 1), so repeated
+    disconnects / duplicate close events won't spam the user.
+    """
+    if pond_collection is None:
+        print(
+            f"[ESP32 OFFLINE] pond_collection is None, "
+            f"skipping update | User: {user_id[:8]}... | Pond: {pond_id[:8]}..."
+        )
+        return
+
+    result = await pond_collection.update_one(
+        {
+            "user_id": user_id,
+            "pond_id": pond_id,
+            "device_status": "online",
+        },
+        {
+            "$set": {
+                "device_status": "offline",
+                "updated_at": app_now(),
+            }
+        },
+    )
+
+    if result.modified_count == 1:
+        print(
+            f"ESP32 OFFLINE"
+            f" | User: {user_id[:8]}..."
+            f" | Pond: {pond_id[:8]}..."
+        )
+
+        try:
+            user = None
+            if user_collection is not None:
+                try:
+                    user = await user_collection.find_one(
+                        {"_id": safe_object_id(user_id)},
+                        {"_id": 0, "phone_number": 1},
+                    )
+                except Exception:
+                    pass
+
+            if user is None:
+                if user_collection is not None:
+                    user = await user_collection.find_one(
+                        {"user_id": user_id},
+                        {"_id": 0, "phone_number": 1},
+                    )
+
+            pond = await pond_collection.find_one(
+                {"user_id": user_id, "pond_id": pond_id},
+                {"_id": 0, "name": 1, "pond_name": 1},
+            )
+
+            phone_number = (user or {}).get("phone_number")
+            pond_name = (pond or {}).get("pond_name") or (pond or {}).get("name") or pond_id
+
+            if not phone_number:
+                print("[SMS] Device offline SMS skipped: user has no phone number")
+                return
+
+            sms_result = send_device_offline_sms(phone_number, pond_name)
+            if isinstance(sms_result, dict) and not sms_result.get("success", False):
+                print(f"[SMS] Device offline SMS failed: {sms_result.get('error', sms_result)}")
+            else:
+                print("[SMS] Device offline SMS sent")
+        except Exception as sms_error:
+            print(f"[SMS] Failed to send device offline SMS: {sms_error}")
+
+    else:
+        print(
+            f"ESP32 disconnected but pond was already offline"
+            f" | User: {user_id[:8]}..."
+            f" | Pond: {pond_id[:8]}..."
+        )
+
+
+
 @router.websocket("/ws/sensor-data/{pond_id}")
 async def websocket_sensor_data(
     websocket: WebSocket,
@@ -379,7 +465,6 @@ async def websocket_sensor_data(
             await websocket.close()
         except Exception:
             pass
-
 
 
 @router.websocket("/ws/auto-control/{user_id}/{pond_id}")
@@ -692,56 +777,37 @@ async def websocket_auto_control(
                 },
             )
 
-    except WebSocketDisconnect:
+    except ConnectionClosedError as e:
         # =========================================================
-        # ESP32 DISCONNECTED
+        # ESP32 CONNECTION LOST / WEBSOCKET TIMEOUT
+        # (Azure keepalive ping timeout → clean log instead of traceback)
         # =========================================================
-        if client_type == "esp32":
+        print(
+            f"\nESP32 CONNECTION LOST"
+            f" | User: {authenticated_user_id[:8]}..."
+            f" | Pond: {pond_id[:8]}..."
+            f" | Client: {client_type}"
+        )
 
-            # Only transition ONLINE → OFFLINE.
-            result = await pond_collection.update_one(
-                {
-                    "user_id": authenticated_user_id,
-                    "pond_id": pond_id,
-                    "device_status": "online",
-                },
-                {
-                    "$set": {
-                        "device_status": "offline",
-                        "updated_at": app_now(),
-                    }
-                },
+        print(f"Reason: {e}")
+
+        if client_type == "esp32":
+            await mark_esp32_offline(
+                authenticated_user_id,
+                pond_id,
             )
 
-            # Send SMS only when an actual
-            # ONLINE → OFFLINE transition happened.
-            if result.modified_count == 1:
-                try:
-                    await send_device_offline_sms(
-                        authenticated_user_id,
-                        pond_id,
-                    )
+        control_manager.disconnect(websocket)
 
-                    print("[SMS] Device offline SMS sent")
-
-                except Exception as sms_error:
-                    print(
-                        f"[SMS] Failed to send device offline SMS: "
-                        f"{sms_error}"
-                    )
-
-                print(
-                    f"ESP32 OFFLINE"
-                    f" | User: {authenticated_user_id[:8]}..."
-                    f" | Pond: {pond_id[:8]}..."
-                )
-
-            else:
-                print(
-                    f"ESP32 disconnected but pond was already offline"
-                    f" | User: {authenticated_user_id[:8]}..."
-                    f" | Pond: {pond_id[:8]}..."
-                )
+    except WebSocketDisconnect:
+        # =========================================================
+        # NORMAL / CLEAN DISCONNECT
+        # =========================================================
+        if client_type == "esp32":
+            await mark_esp32_offline(
+                authenticated_user_id,
+                pond_id,
+            )
 
         print(
             f"\nAUTO CONTROL WS DISCONNECTED"
@@ -753,6 +819,9 @@ async def websocket_auto_control(
         control_manager.disconnect(websocket)
 
     except Exception as e:
+        # =========================================================
+        # UNEXPECTED SERVER ERROR
+        # =========================================================
         print(
             f"\nAUTO CONTROL WS ERROR"
             f" | User: {authenticated_user_id[:8]}..."
@@ -762,12 +831,18 @@ async def websocket_auto_control(
 
         print(f"Error: {e}")
 
+        if client_type == "esp32":
+            await mark_esp32_offline(
+                authenticated_user_id,
+                pond_id,
+            )
+
         control_manager.disconnect(websocket)
 
         try:
             await websocket.close()
         except Exception:
-            pass
+            pass 
 
   
         
