@@ -13,12 +13,13 @@ user_collection = None
 pond_requests_collection = None
 pond_request_activity_collection = None
 ai_advice_collection = None
+pondAutomation_collection = None
 
 
 async def init_db():
     global client, database, sensors_collection
     global Control_collection, pond_collection, user_collection, pond_requests_collection
-    global pond_request_activity_collection, ai_advice_collection
+    global pond_request_activity_collection, ai_advice_collection, pondAutomation_collection
 
     try:
         client = AsyncIOMotorClient(MONGO_DETAILS)
@@ -35,6 +36,7 @@ async def init_db():
         pond_requests_collection = database.get_collection("pond_requests")
         pond_request_activity_collection = database.get_collection("pond_request_activity")
         ai_advice_collection = database.get_collection("aiAdvice")
+        pondAutomation_collection = database.get_collection("pond_automation")
 
         print("\n===================================")
         print("MongoDB Atlas connection successful!")

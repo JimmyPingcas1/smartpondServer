@@ -1,4 +1,5 @@
 # from .AutoSensorControlRoute import router as main_sensor_control_router
+from .esp32Routes import router as esp32_router
 from .authRoute import router as auth_router
 from .AdminPanelRoute import router as admin_panel_router
 from .userRoute import router as user_dashboard_router
@@ -8,7 +9,7 @@ from .buttonRoutes import router as button_router
 
 # List of all routers
 routers = [
-    # main_sensor_control_router,
+    esp32_router,
     auth_router,
     admin_panel_router,
     user_dashboard_router,

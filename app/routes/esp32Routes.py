@@ -1,4 +1,5 @@
 from datetime import datetime
+import math
 
 from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -9,6 +10,7 @@ from ..db import (
     pond_collection,
     sensors_collection,
     user_collection,
+    pondAutomation_collection
 )
 from ..helpers.problemIdentifier import identify_problem, identify_problems
 from ..helpers.sensorValidator import validate_sensor_data
@@ -56,10 +58,21 @@ async def process_sensor_data(
         # ============================================================
         # 1. Get the 4 real ESP32 sensor readings
         # ============================================================
-        temp = float(data.get("temperature"))
-        turbidity = float(data.get("turbidity"))
-        ph = float(data.get("ph"))
-        ammonia = float(data.get("ammonia"))
+        # Match the JSON fields sent by sensor.md and reject missing/non-finite
+        # readings before calling the AI provider or writing to MongoDB.
+        readings = {
+            "temperature": float(data.get("temperature")),
+            "turbidity": float(data.get("turbidity")),
+            "ph": float(data.get("ph")),
+            "ammonia": float(data.get("ammonia")),
+        }
+        if not all(math.isfinite(value) for value in readings.values()):
+            raise ValueError("Sensor readings must be finite numbers")
+
+        temp = readings["temperature"]
+        turbidity = readings["turbidity"]
+        ph = readings["ph"]
+        ammonia = readings["ammonia"]
 
         # ============================================================
         # 2. AI estimates the 5th sensor: Dissolved Oxygen
@@ -72,6 +85,8 @@ async def process_sensor_data(
         )
 
         dissolved_oxygen = float(str(dissolved_oxygen).strip())
+        if not math.isfinite(dissolved_oxygen):
+            raise ValueError("Estimated dissolved oxygen must be a finite number")
 
         print(
             f"[AI DO] "
@@ -216,13 +231,24 @@ async def automation_device_state(
             }
         )
 
+        # Record ONLY the device action received from ESP32
+        await pondAutomation_collection.insert_one({
+            "user_id": user_id,
+            "pond_id": pond_id,
+            "device": device,
+            "action": action,
+            "timestamp": execution_time,
+            "source": "esp32_automation"
+        })
+
         print("   Physical Device State Updated")
+        print("   Automation History Recorded")
         print("   Automation: ON")
         print(f"   Aerator={devices['aerator']}, Waterpump={devices['waterpump']}, Heater={devices['heater']}")
 
         try:
-            await sensor_manager.broadcast(
-                {
+            await control_manager.broadcast(
+            {
                     "type": "device_control",
                     "device": device,
                     "action": action,
@@ -260,7 +286,6 @@ async def automation_device_state(
             detail=str(e)
         )
 
-
 # esp32 --- sends alert
 @router.post("/api/v1/warnings")
 async def create_warning(
@@ -269,8 +294,11 @@ async def create_warning(
     data: dict = Body(...)
 ):
     try:
-        sensors = data.get("sensors", {})
+        # ESP32 firmware commonly sends the readings at the top level, while
+        # older clients send them under "sensors". Support both payloads.
+        sensors = data.get("sensors", data)
         esp_status = data.get("status", "warning")
+        issue_type = data.get("issue_type", "water_quality")
 
         if not isinstance(sensors, dict):
             return {
@@ -279,7 +307,239 @@ async def create_warning(
             }
 
         # ============================================================
-        # 1. Get sensor values
+        # 1. SENSOR ERROR GATE (before reading conversion/validation/AI)
+        # ============================================================
+        sensor_status = data.get("sensor_status", True)
+        sensor_errors = data.get("sensor_errors", [])
+
+        if not isinstance(sensor_errors, list):
+            sensor_errors = []
+
+        if esp_status == "sensor_error" or sensor_status is False:
+
+            print()
+            print("=" * 70)
+            print("ESP32 SENSOR ERROR")
+            print("=" * 70)
+            print(f"User ID: {user_id}")
+            print(f"Pond ID: {pond_id}")
+            print(f"Issue Type: {issue_type}")
+            print(f"Sensor Status: {sensor_status}")
+            print(f"Sensor Errors: {sensor_errors}")
+
+            # --------------------------------------------------------
+            # 2.1 Get user phone number
+            # --------------------------------------------------------
+            user = await user_collection.find_one(
+                {"user_id": user_id},
+                {"_id": 0, "name": 1, "phone_number": 1}
+            )
+
+            phone_number = None
+            user_name = "User"
+
+            if user:
+                phone_number = user.get("phone_number")
+                user_name = user.get("name", "User")
+
+            # --------------------------------------------------------
+            # 2.2 Get pond name
+            # --------------------------------------------------------
+            pond = await pond_collection.find_one(
+                {"user_id": user_id, "pond_id": pond_id},
+                {"_id": 0, "name": 1, "pond_name": 1}
+            )
+
+            pond_name = "your pond"
+
+            if pond:
+                pond_name = (
+                    pond.get("pond_name")
+                    or pond.get("name")
+                    or "your pond"
+                )
+
+            # --------------------------------------------------------
+            # 2.3 Mark pond sensor_status FALSE
+            # --------------------------------------------------------
+            await pond_collection.update_one(
+                {"user_id": user_id, "pond_id": pond_id},
+                {
+                    "$set": {
+                        "sensor_status": False,
+                        "updated_at": app_now()
+                    }
+                }
+            )
+
+            print("Pond sensor_status: FALSE")
+
+            # --------------------------------------------------------
+            # 2.4 Turn everything OFF
+            # --------------------------------------------------------
+            safe_devices = {
+                "aerator": False,
+                "waterpump": False,
+                "heater": False
+            }
+
+            await Control_collection.update_one(
+                {"user_id": user_id, "pond_id": pond_id},
+                {
+                    "$set": {
+                        "automation": False,
+                        "devices": safe_devices,
+                        "updated_at": app_now()
+                    }
+                },
+                upsert=True
+            )
+
+            print("Automation: OFF")
+            print("Aerator: OFF")
+            print("Waterpump: OFF")
+            print("Heater: OFF")
+
+            # --------------------------------------------------------
+            # 2.5 Broadcast automation safety shutdown
+            # --------------------------------------------------------
+            try:
+                await control_manager.broadcast(
+                    {
+                        "type": "automation",
+                        "automation": False,
+                        "manualMode": True,
+                        "devices": safe_devices,
+                        "status": "safety_shutdown",
+                        "source": "sensor_error",
+                        "reason": "sensor_error",
+                        "invalid_sensors": sensor_errors
+                    },
+                    user_id,
+                    pond_id
+                )
+                print("WebSocket Automation OFF: SUCCESS")
+            except Exception as ws_error:
+                print("WebSocket Automation OFF ERROR:", str(ws_error))
+
+            # --------------------------------------------------------
+            # 2.6 Broadcast each device OFF
+            # --------------------------------------------------------
+            for device in ["aerator", "waterpump", "heater"]:
+                try:
+                    await control_manager.broadcast(
+                        {
+                            "type": "device_control",
+                            "device": device,
+                            "action": "OFF",
+                            "devices": safe_devices,
+                            "automation": False,
+                            "manualMode": True,
+                            "source": "sensor_error",
+                            "status": "safety_shutdown",
+                            "reason": "sensor_error",
+                            "invalid_sensors": sensor_errors
+                        },
+                        user_id,
+                        pond_id
+                    )
+                    print(f"{device.upper()} OFF Broadcast: SUCCESS")
+                except Exception as ws_error:
+                    print(f"{device.upper()} OFF Broadcast ERROR:", str(ws_error))
+
+            # --------------------------------------------------------
+            # 2.7 Send sensor-error SMS
+            # --------------------------------------------------------
+            sms_sent = False
+            sms_error = None
+
+            if phone_number:
+                try:
+                    sms_result = send_sensor_out_of_range_sms(
+                        phone_number=phone_number,
+                        pond_name=pond_name,
+                        invalid_sensors=sensor_errors
+                    )
+
+                    if isinstance(sms_result, dict):
+                        sms_sent = bool(sms_result.get("success", False))
+                    else:
+                        sms_sent = True
+
+                    print(
+                        "Sensor error SMS:",
+                        "SUCCESS" if sms_sent else "FAILED"
+                    )
+                except Exception as e:
+                    sms_error = str(e)
+                    print("Sensor error SMS ERROR:", sms_error)
+            else:
+                print("Sensor error SMS NOT SENT: User has no phone number.")
+
+            print("=" * 70)
+
+            # --------------------------------------------------------
+            # 2.8 STOP HERE (no AI)
+            # --------------------------------------------------------
+            return {
+                "success": False,
+                "message": (
+                    "Sensor error detected. "
+                    "AI analysis was stopped and all devices "
+                    "were turned off."
+                ),
+                "status": "sensor_error",
+                "issue_type": "sensor_error",
+                "sensor_status": False,
+                "automation": False,
+                "devices": safe_devices,
+                "invalid_sensors": sensor_errors,
+                "sms_sent": sms_sent,
+                "sms_error": sms_error
+            }
+
+        # ============================================================
+        # 3. SENSOR RECOVERY (fixed + sensor_error)
+        # ============================================================
+        if esp_status == "fixed" and issue_type == "sensor_error":
+
+            print()
+            print("=" * 70)
+            print("SENSOR RECOVERY")
+            print("=" * 70)
+            print(f"User ID: {user_id}")
+            print(f"Pond ID: {pond_id}")
+            print(f"Sensors: {sensors}")
+
+            # Mark pond sensor_status TRUE
+            await pond_collection.update_one(
+                {"user_id": user_id, "pond_id": pond_id},
+                {
+                    "$set": {
+                        "sensor_status": True,
+                        "updated_at": app_now()
+                    }
+                }
+            )
+
+            print("Pond sensor_status: TRUE")
+
+            # NOTE: we do NOT change automation or devices here.
+            # Recovery only clears the sensor_error flag;
+            # automation stays wherever the user left it.
+
+            print("=" * 70)
+
+            return {
+                "success": True,
+                "message": "All sensors are working again.",
+                "status": "fixed",
+                "issue_type": "sensor_error",
+                "sensor_status": True
+            }
+
+        # ============================================================
+        # 3. Get sensor values for normal warning/fixed readings
         # ============================================================
         try:
             temperature = float(sensors.get("temperature"))
@@ -293,7 +553,7 @@ async def create_warning(
             }
 
         # ============================================================
-        # 2. VALIDATE PHYSICAL SENSOR RANGE
+        # 4. VALIDATE PHYSICAL SENSOR RANGE
         # ============================================================
         validation = validate_sensor_data({
             "temperature": temperature,
@@ -313,9 +573,9 @@ async def create_warning(
             print(f"Invalid Sensors: {validation['invalid_sensors']}")
             print(f"Validation Errors: {validation['errors']}")
 
-            # ========================================================
-            # 2.1 GET USER PHONE NUMBER
-            # ========================================================
+            # --------------------------------------------------------
+            # 4.1 Get user phone number
+            # --------------------------------------------------------
             user = await user_collection.find_one(
                 {"user_id": user_id},
                 {"_id": 0, "name": 1, "phone_number": 1}
@@ -328,9 +588,9 @@ async def create_warning(
                 phone_number = user.get("phone_number")
                 user_name = user.get("name", "User")
 
-            # ========================================================
-            # 2.2 GET POND NAME
-            # ========================================================
+            # --------------------------------------------------------
+            # 4.2 Get pond name
+            # --------------------------------------------------------
             pond = await pond_collection.find_one(
                 {"user_id": user_id, "pond_id": pond_id},
                 {"_id": 0, "name": 1, "pond_name": 1}
@@ -345,9 +605,9 @@ async def create_warning(
                     or "your pond"
                 )
 
-            # ========================================================
-            # 2.2.1 MARK POND SENSOR STATUS AS FALSE
-            # ========================================================
+            # --------------------------------------------------------
+            # 4.3 Mark pond sensor_status FALSE
+            # --------------------------------------------------------
             await pond_collection.update_one(
                 {"user_id": user_id, "pond_id": pond_id},
                 {
@@ -360,18 +620,15 @@ async def create_warning(
 
             print("Pond sensor_status: FALSE")
 
-            # ========================================================
-            # 2.3 TURN EVERYTHING OFF
-            # ========================================================
+            # --------------------------------------------------------
+            # 4.4 Turn everything OFF
+            # --------------------------------------------------------
             safe_devices = {
                 "aerator": False,
                 "waterpump": False,
                 "heater": False
             }
 
-            # ========================================================
-            # 2.4 UPDATE DATABASE
-            # ========================================================
             await Control_collection.update_one(
                 {"user_id": user_id, "pond_id": pond_id},
                 {
@@ -389,9 +646,9 @@ async def create_warning(
             print("Waterpump: OFF")
             print("Heater: OFF")
 
-            # ========================================================
-            # 2.5 BROADCAST AUTOMATION OFF
-            # ========================================================
+            # --------------------------------------------------------
+            # 4.5 Broadcast automation OFF
+            # --------------------------------------------------------
             try:
                 await control_manager.broadcast(
                     {
@@ -412,9 +669,9 @@ async def create_warning(
             except Exception as ws_error:
                 print("WebSocket Automation OFF ERROR:", str(ws_error))
 
-            # ========================================================
-            # 2.6 BROADCAST EACH DEVICE OFF
-            # ========================================================
+            # --------------------------------------------------------
+            # 4.6 Broadcast each device OFF
+            # --------------------------------------------------------
             for device in ["aerator", "waterpump", "heater"]:
                 try:
                     await control_manager.broadcast(
@@ -437,9 +694,9 @@ async def create_warning(
                 except Exception as ws_error:
                     print(f"{device.upper()} OFF Broadcast ERROR:", str(ws_error))
 
-            # ========================================================
-            # 2.7 SEND SMS
-            # ========================================================
+            # --------------------------------------------------------
+            # 4.7 Send SMS
+            # --------------------------------------------------------
             sms_sent = False
             sms_error = None
 
@@ -465,9 +722,9 @@ async def create_warning(
 
             print("=" * 70)
 
-            # ========================================================
-            # 2.8 STOP HERE
-            # ========================================================
+            # --------------------------------------------------------
+            # 4.8 STOP HERE (no AI)
+            # --------------------------------------------------------
             return {
                 "success": False,
                 "message": (
@@ -475,6 +732,7 @@ async def create_warning(
                     "Automation and all devices were turned off."
                 ),
                 "status": "invalid_sensor",
+                "issue_type": "sensor_error",
                 "automation": False,
                 "devices": safe_devices,
                 "invalid_sensors": validation["invalid_sensors"],
@@ -484,7 +742,7 @@ async def create_warning(
             }
 
         # ============================================================
-        # 2.9 MARK POND SENSOR STATUS AS TRUE (VALID READING)
+        # 5. MARK POND SENSOR STATUS AS TRUE (VALID READING)
         # ============================================================
         await pond_collection.update_one(
             {"user_id": user_id, "pond_id": pond_id},
@@ -499,7 +757,7 @@ async def create_warning(
         print("Pond sensor_status: TRUE")
 
         # ============================================================
-        # 3. Estimate dissolved oxygen using AI
+        # 6. Estimate dissolved oxygen using AI
         # ============================================================
         dissolved_oxygen = await estimate_dissolved_oxygen(
             temperature=temperature,
@@ -517,7 +775,7 @@ async def create_warning(
             }
 
         # ============================================================
-        # 4. Prepare sensor parameters
+        # 7. Prepare sensor parameters
         # ============================================================
         parameters = {
             "temperature": temperature,
@@ -528,7 +786,7 @@ async def create_warning(
         }
 
         # ============================================================
-        # 5. Identify pond problems
+        # 8. Identify pond problems
         # ============================================================
         problems = identify_problems(
             temperature=temperature,
@@ -547,7 +805,7 @@ async def create_warning(
         )
 
         # ============================================================
-        # 6. Determine warning/fixed status
+        # 9. Determine warning/fixed status
         # ============================================================
         if esp_status not in ["warning", "fixed"]:
             status = "warning" if problems else "fixed"
@@ -555,13 +813,12 @@ async def create_warning(
             status = esp_status
 
         # ============================================================
-        # 6.1 SEND WATER QUALITY SMS
+        # 9.1 SEND WATER QUALITY SMS
         # ============================================================
         sms_sent = False
         sms_error = None
 
         try:
-            # Get user phone number
             user = await user_collection.find_one(
                 {"user_id": user_id},
                 {"_id": 0, "name": 1, "phone_number": 1}
@@ -572,7 +829,6 @@ async def create_warning(
             if user:
                 phone_number = user.get("phone_number")
 
-            # Get pond name
             pond = await pond_collection.find_one(
                 {"user_id": user_id, "pond_id": pond_id},
                 {"_id": 0, "name": 1, "pond_name": 1}
@@ -587,7 +843,6 @@ async def create_warning(
                     or "your pond"
                 )
 
-            # Send SMS if phone number exists
             if phone_number:
                 sms_result = send_water_quality_sms(
                     phone_number=phone_number,
@@ -604,7 +859,6 @@ async def create_warning(
                     print(f"Water quality {status} SMS: SUCCESS")
                 else:
                     print(f"Water quality {status} SMS: FAILED")
-
             else:
                 print(
                     "Water quality SMS NOT SENT: "
@@ -616,7 +870,7 @@ async def create_warning(
             print("Water quality SMS ERROR:", sms_error)
 
         # ============================================================
-        # 7. Create ONE Philippine-time timestamp
+        # 10. Create ONE Philippine-time timestamp
         # ============================================================
         now = app_now()
         timestamp = now.isoformat()
@@ -628,7 +882,7 @@ async def create_warning(
         print("========================================")
 
         # ============================================================
-        # 8. Save sensor record
+        # 11. Save sensor record
         # ============================================================
         sensor_doc = {
             "user_id": user_id,
@@ -645,7 +899,7 @@ async def create_warning(
         sensor_result = await sensors_collection.insert_one(sensor_doc)
 
         # ============================================================
-        # 9. Get current device states
+        # 12. Get current device states
         # ============================================================
         control_doc = await Control_collection.find_one(
             {"user_id": user_id, "pond_id": pond_id},
@@ -661,7 +915,7 @@ async def create_warning(
         }
 
         # ============================================================
-        # 10. Generate AI advice
+        # 13. Generate AI advice
         # ============================================================
         if status == "warning":
             advice = await get_warning_ai_advice(
@@ -684,7 +938,7 @@ async def create_warning(
             )
 
         # ============================================================
-        # 11. Save AI advice using SAME Philippine timestamp
+        # 14. Save AI advice using SAME timestamp
         # ============================================================
         ai_advice_doc = {
             "user_id": user_id,
@@ -702,7 +956,7 @@ async def create_warning(
         ai_result = await ai_advice_collection.insert_one(ai_advice_doc)
 
         # ============================================================
-        # 12. Display AI result in CMD
+        # 15. Display AI result in CMD
         # ============================================================
         print()
         print("=" * 70)
@@ -735,12 +989,13 @@ async def create_warning(
         print()
 
         # ============================================================
-        # 13. Return response
+        # 16. Return response
         # ============================================================
         return {
             "success": True,
             "message": "Sensor data and AI advice processed",
             "status": status,
+            "issue_type": issue_type,
             "parameters": parameters,
             "problems": problems,
             "problem_message": problem_message,
@@ -760,6 +1015,4 @@ async def create_warning(
             "message": "Failed to process sensor data",
             "error": str(e)
         }
-
-
 

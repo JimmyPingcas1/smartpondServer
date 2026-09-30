@@ -1,8 +1,16 @@
 from typing import Dict, Any
+import math
 
 
-# Physical/plausible sensor limits.
+# ============================================================
+# PHYSICAL / PLAUSIBLE SENSOR LIMITS
+# ============================================================
 # These are NOT the fishpond's safe/danger limits.
+#
+# They only determine whether a sensor reading is physically
+# plausible and usable for further processing.
+# ============================================================
+
 SENSOR_LIMITS = {
     "temperature": {
         "min": 0.0,
@@ -23,6 +31,10 @@ SENSOR_LIMITS = {
 }
 
 
+# ============================================================
+# VALIDATE ONE SENSOR VALUE
+# ============================================================
+
 def validate_sensor_value(sensor_name: str, value: Any) -> bool:
     """
     Validate one sensor reading.
@@ -40,20 +52,30 @@ def validate_sensor_value(sensor_name: str, value: Any) -> bool:
     except (TypeError, ValueError):
         return False
 
-    if value < SENSOR_LIMITS[sensor_name]["min"]:
+    # Reject NaN and Infinity
+    if not math.isfinite(value):
         return False
 
-    if value > SENSOR_LIMITS[sensor_name]["max"]:
+    limits = SENSOR_LIMITS[sensor_name]
+
+    if value < limits["min"]:
+        return False
+
+    if value > limits["max"]:
         return False
 
     return True
 
 
+# ============================================================
+# VALIDATE ALL SENSOR READINGS
+# ============================================================
+
 def validate_sensor_data(sensor_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Validate all sensor readings.
+    Validate all required sensor readings.
 
-    Returns a result containing:
+    Returns:
         valid
         invalid_sensors
         errors
@@ -63,12 +85,34 @@ def validate_sensor_data(sensor_data: Dict[str, Any]) -> Dict[str, Any]:
     errors = []
 
     for sensor_name in SENSOR_LIMITS:
+
+        # ----------------------------------------------------
+        # Missing sensor reading
+        # ----------------------------------------------------
         if sensor_name not in sensor_data:
+            invalid_sensors.append(sensor_name)
+
+            limits = SENSOR_LIMITS[sensor_name]
+
+            errors.append({
+                "sensor": sensor_name,
+                "value": None,
+                "min": limits["min"],
+                "max": limits["max"],
+                "message": (
+                    f"{sensor_name} reading is missing."
+                ),
+            })
+
             continue
 
         value = sensor_data[sensor_name]
 
+        # ----------------------------------------------------
+        # Invalid sensor reading
+        # ----------------------------------------------------
         if not validate_sensor_value(sensor_name, value):
+
             invalid_sensors.append(sensor_name)
 
             limits = SENSOR_LIMITS[sensor_name]
@@ -80,7 +124,7 @@ def validate_sensor_data(sensor_data: Dict[str, Any]) -> Dict[str, Any]:
                 "max": limits["max"],
                 "message": (
                     f"{sensor_name} reading is outside "
-                    f"the valid sensor range."
+                    f"the valid sensor range or is invalid."
                 ),
             })
 
@@ -89,3 +133,4 @@ def validate_sensor_data(sensor_data: Dict[str, Any]) -> Dict[str, Any]:
         "invalid_sensors": invalid_sensors,
         "errors": errors,
     }
+
