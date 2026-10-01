@@ -8,6 +8,23 @@ from ..db import ai_advice_collection, pond_collection, sensors_collection
 router = APIRouter()
 
 
+def _created_at_sort_key(value):
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return datetime.min.replace(tzinfo=timezone.utc)
+    else:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.astimezone(timezone.utc)
+
+
 @router.get("/api/v1/pondProblems")
 async def get_pond_problems(
     user_id: str = Depends(get_current_user_id)
@@ -29,7 +46,7 @@ async def get_pond_problems(
             pond_id = str(pond.get("pond_id") or pond["_id"])
             pond_name = pond.get("pond_name") or pond.get("name") or "Unnamed Pond"
 
-            problem_doc = await ai_advice_collection.find_one(
+            problem_docs = await ai_advice_collection.find(
                 {
                     "user_id": user_id,
                     "pond_id": pond_id,
@@ -42,7 +59,14 @@ async def get_pond_problems(
                     "advice": 1,
                     "created_at": 1,
                 },
-                sort=[("created_at", -1)]
+            ).to_list(length=None)
+
+            problem_doc = max(
+                problem_docs,
+                key=lambda document: _created_at_sort_key(
+                    document.get("created_at")
+                ),
+                default=None,
             )
 
             if problem_doc:
