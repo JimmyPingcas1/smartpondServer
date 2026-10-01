@@ -20,11 +20,11 @@ namespace CFG {
   const char* WIFI_PASSWORD = "1";
 
   // ---- Account / Pond ----
-  const char* USER_ID = "";
-  const char* POND_ID = "";
+  const char* USER_ID = "69a39acc56b522b28deec4a9";
+  const char* POND_ID = "69a39f9cbb28dfc1b9a307fb";
 
-  // ---- Azure server ----
-  const char* HOST = "smartpondcaps.azurewebsites.net";
+ // ---- Render server ----
+  const char* HOST = "smartpond-server.onrender.com";
   const uint16_t PORT = 443;
 
   // ---- Timing (ms) ----

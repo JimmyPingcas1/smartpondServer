@@ -17,6 +17,7 @@ async def get_pond_problems(
             {"user_id": user_id},
             {
                 "_id": 1,
+                "pond_id": 1,
                 "pond_name": 1,
                 "name": 1,
             }
@@ -25,7 +26,7 @@ async def get_pond_problems(
         ponds = []
 
         async for pond in ponds_cursor:
-            pond_id = str(pond["_id"])
+            pond_id = str(pond.get("pond_id") or pond["_id"])
             pond_name = pond.get("pond_name") or pond.get("name") or "Unnamed Pond"
 
             problem_doc = await ai_advice_collection.find_one(
