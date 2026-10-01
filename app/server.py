@@ -117,7 +117,14 @@ def debug_ip():
 
 @app.get("/debug/openai")
 def debug_openai():
+    outbound_ip = None
+
     try:
+        outbound_ip = requests.get(
+            "https://api.ipify.org",
+            timeout=10
+        ).text.strip()
+
         client = OpenAI(
             api_key=os.getenv("OPENAI_API_KEY")
         )
@@ -129,16 +136,17 @@ def debug_openai():
 
         return {
             "success": True,
+            "outbound_ip": outbound_ip,
             "response": response.output_text
         }
 
     except Exception as e:
         return {
             "success": False,
+            "outbound_ip": outbound_ip,
             "error_type": type(e).__name__,
             "error": str(e)
         }
-
 
 # Local execution
 # ---------------
