@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 import requests
+from openai import OpenAI
 
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -112,6 +113,32 @@ def debug_ip():
         return {"outbound_ip": ip}
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.get("/debug/openai")
+def debug_openai():
+    try:
+        client = OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY")
+        )
+
+        response = client.responses.create(
+            model="gpt-5-mini",
+            input="Reply with the word OK."
+        )
+
+        return {
+            "success": True,
+            "response": response.output_text
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error_type": type(e).__name__,
+            "error": str(e)
+        }
+
 
 # Local execution
 # ---------------
