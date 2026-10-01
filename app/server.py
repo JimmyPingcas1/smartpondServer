@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+import requests
 
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -104,6 +105,13 @@ app.add_exception_handler(
 def api_health():
     return {"status": "ok"}
 
+@app.get("/debug/ip")
+def debug_ip():
+    try:
+        ip = requests.get("https://api.ipify.org", timeout=10).text
+        return {"outbound_ip": ip}
+    except Exception as e:
+        return {"error": str(e)}
 
 # Local execution
 # ---------------
