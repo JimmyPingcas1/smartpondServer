@@ -109,15 +109,6 @@ def api_health():
 @app.get("/debug/ip")
 def debug_ip():
     try:
-        ip = requests.get("https://api.ipify.org", timeout=10).text
-        return {"outbound_ip": ip}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.get("/debug/ip")
-def debug_ip():
-    try:
         response = requests.get(
             "https://ipapi.co/json/",
             timeout=10
@@ -138,6 +129,41 @@ def debug_ip():
         return {
             "error": str(e)
         }
+
+
+@app.get("/debug/openai")
+def debug_openai():
+    outbound_ip = None
+
+    try:
+        outbound_ip = requests.get(
+            "https://api.ipify.org",
+            timeout=10
+        ).text.strip()
+
+        client = OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY")
+        )
+
+        response = client.responses.create(
+            model="gpt-5-mini",
+            input="Reply with the word OK."
+        )
+
+        return {
+            "success": True,
+            "outbound_ip": outbound_ip,
+            "response": response.output_text
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "outbound_ip": outbound_ip,
+            "error_type": type(e).__name__,
+            "error": str(e)
+        }
+
 
 
 
