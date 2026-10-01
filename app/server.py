@@ -115,38 +115,31 @@ def debug_ip():
         return {"error": str(e)}
 
 
-@app.get("/debug/openai")
-def debug_openai():
-    outbound_ip = None
-
+@app.get("/debug/ip")
+def debug_ip():
     try:
-        outbound_ip = requests.get(
-            "https://api.ipify.org",
+        response = requests.get(
+            "https://ipapi.co/json/",
             timeout=10
-        ).text.strip()
-
-        client = OpenAI(
-            api_key=os.getenv("OPENAI_API_KEY")
         )
 
-        response = client.responses.create(
-            model="gpt-5-mini",
-            input="Reply with the word OK."
-        )
+        data = response.json()
 
         return {
-            "success": True,
-            "outbound_ip": outbound_ip,
-            "response": response.output_text
+            "outbound_ip": data.get("ip"),
+            "country": data.get("country_name"),
+            "country_code": data.get("country_code"),
+            "region": data.get("region"),
+            "city": data.get("city"),
+            "org": data.get("org")
         }
 
     except Exception as e:
         return {
-            "success": False,
-            "outbound_ip": outbound_ip,
-            "error_type": type(e).__name__,
             "error": str(e)
         }
+
+
 
 # Local execution
 # ---------------
