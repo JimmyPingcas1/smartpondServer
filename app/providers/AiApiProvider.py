@@ -77,6 +77,13 @@ pH: {ph}
 Ammonia: {ammonia} mg/L
 Dissolved Oxygen: {dissolved_oxygen} mg/L
 
+Safe ranges used by SmartPond:
+- Temperature: 25–30°C
+- pH: 6.5–7.5
+- Turbidity: 10–50 NTU
+- Ammonia: ≤ 0.02 mg/L
+- Dissolved Oxygen: > 4 mg/L
+
 Current device status:
 Aerator: {"ON" if aerator else "OFF"}
 Water Pump: {"ON" if waterpump else "OFF"}
@@ -92,18 +99,32 @@ Give a short recommendation for the fish farmer.
 
 Use exactly this format:
 
-Water condition: Write one short sentence.
+Water condition:  State the water problem and include only the measured values of the parameters that are outside the safe range.
 Risk: Write one short sentence.
 Action: Write one short sentence.
 
 Rules:
 - Answer using the requested language.
 - Use simple words that a fish farmer can easily understand.
+
+- Use the SmartPond safe ranges above specifically for hito fingerlings.
+- Compare each measured parameter with its corresponding safe range.
+- Include only parameters that are outside the safe range in the Water condition.
+- Always include the actual measured value of each problematic parameter.
+- Clearly state whether the parameter is too high or too low.
+- Do not mention parameters that are within the safe range.
+- Base the Risk only on the detected water-quality problems.
+
 - Consider the current device status when giving the Action.
 - If a device is already ON and should remain ON, tell the farmer to keep it ON.
 - If a device is OFF and should be turned ON to address the water condition, recommend turning it ON.
+- Base the Action only on the detected water-quality problems and current device status.
+- Recommend only actions that can directly help address the detected problem.
 - Only recommend a device action when it is relevant to the water condition.
+- If multiple parameters are outside the safe range, consider all of them when giving the Action.
 - Do not recommend unnecessary device changes.
+
+- If all parameters are within the safe range, state that the water condition is within the safe range and do not recommend unnecessary device changes.
 - Do not use Markdown.
 - Do not use bullet points.
 - Do not add extra explanations.
@@ -125,7 +146,7 @@ Rules:
                 "content": prompt
             }
         ],
-        temperature=0.7
+        temperature=0.2
     )
 
     return response.choices[0].message.content
