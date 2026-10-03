@@ -15,6 +15,7 @@ from ..db import (
 from ..helpers.problemIdentifier import identify_problem, identify_problems
 from ..helpers.sensorValidator import validate_sensor_data
 from ..helpers.time_utils import app_now
+from ..helpers.pondDataSafeRange import is_pond_sensor_data_safe
 from ..providers.AiApiProvider import (
     estimate_dissolved_oxygen,
     get_after_fix_advice,
@@ -285,6 +286,7 @@ async def automation_device_state(
             status_code=500,
             detail=str(e)
         )
+
 
 # esp32 --- sends alert
 @router.post("/api/v1/warnings")
@@ -742,7 +744,60 @@ async def create_warning(
             }
 
         # ============================================================
-        # 5. MARK POND SENSOR STATUS AS TRUE (VALID READING)
+        # 5. VERIFY ESP32 WARNING BEFORE DO ESTIMATION
+        # ============================================================
+        if esp_status == "warning":
+
+            pond_sensor_data_safe = is_pond_sensor_data_safe(
+                temperature=temperature,
+                ph=ph,
+                turbidity=turbidity,
+                ammonia=ammonia
+            )
+
+            print()
+            print("=" * 70)
+            print("ESP32 WARNING VALIDATION")
+            print("=" * 70)
+            print(f"ESP32 Status: {esp_status}")
+            print(f"Temperature: {temperature}")
+            print(f"pH: {ph}")
+            print(f"Turbidity: {turbidity}")
+            print(f"Ammonia: {ammonia}")
+            print(f"Actual Sensor Data Safe: {pond_sensor_data_safe}")
+            print("=" * 70)
+
+            if pond_sensor_data_safe:
+
+                print("ESP32 SENT AN INVALID WARNING.")
+                print("All actual sensor readings are within the safe range.")
+                print("STOPPING PROCESSING BEFORE DO ESTIMATION.")
+                print("No DO estimation.")
+                print("No problem identification.")
+                print("No SMS.")
+                print("No database sensor record.")
+                print("No AI advice.")
+
+                return {
+                    "success": True,
+                    "message": (
+                        "ESP32 warning ignored because the current "
+                        "sensor readings are within the safe range."
+                    ),
+                    "status": "ignored",
+                    "issue_type": issue_type,
+                    "parameters": {
+                        "temperature": temperature,
+                        "ph": ph,
+                        "turbidity": turbidity,
+                        "ammonia": ammonia
+                    },
+                    "do_estimated": False,
+                    "ai_called": False
+                }
+
+        # ============================================================
+        # 6. MARK POND SENSOR STATUS AS TRUE (VALID READING)
         # ============================================================
         await pond_collection.update_one(
             {"user_id": user_id, "pond_id": pond_id},
@@ -757,7 +812,7 @@ async def create_warning(
         print("Pond sensor_status: TRUE")
 
         # ============================================================
-        # 6. Estimate dissolved oxygen using AI
+        # 7. Estimate dissolved oxygen using AI
         # ============================================================
         dissolved_oxygen = await estimate_dissolved_oxygen(
             temperature=temperature,
@@ -775,7 +830,7 @@ async def create_warning(
             }
 
         # ============================================================
-        # 7. Prepare sensor parameters
+        # 8. Prepare sensor parameters
         # ============================================================
         parameters = {
             "temperature": temperature,
@@ -786,7 +841,7 @@ async def create_warning(
         }
 
         # ============================================================
-        # 8. Identify pond problems
+        # 9. Identify pond problems
         # ============================================================
         problems = identify_problems(
             temperature=temperature,
@@ -805,7 +860,7 @@ async def create_warning(
         )
 
         # ============================================================
-        # 9. Determine warning/fixed status
+        # 10. Determine warning/fixed status
         # ============================================================
         if esp_status not in ["warning", "fixed"]:
             status = "warning" if problems else "fixed"
@@ -813,7 +868,7 @@ async def create_warning(
             status = esp_status
 
         # ============================================================
-        # 9.1 SEND WATER QUALITY SMS
+        # 10.1 SEND WATER QUALITY SMS
         # ============================================================
         sms_sent = False
         sms_error = None
@@ -870,7 +925,7 @@ async def create_warning(
             print("Water quality SMS ERROR:", sms_error)
 
         # ============================================================
-        # 10. Create ONE Philippine-time timestamp
+        # 11. Create ONE Philippine-time timestamp
         # ============================================================
         now = app_now()
         timestamp = now.isoformat()
@@ -882,7 +937,7 @@ async def create_warning(
         print("========================================")
 
         # ============================================================
-        # 11. Save sensor record
+        # 12. Save sensor record
         # ============================================================
         sensor_doc = {
             "user_id": user_id,
@@ -899,7 +954,7 @@ async def create_warning(
         sensor_result = await sensors_collection.insert_one(sensor_doc)
 
         # ============================================================
-        # 12. Get current device states
+        # 13. Get current device states
         # ============================================================
         control_doc = await Control_collection.find_one(
             {"user_id": user_id, "pond_id": pond_id},
@@ -915,7 +970,7 @@ async def create_warning(
         }
 
         # ============================================================
-        # 13. Generate AI advice
+        # 14. Generate AI advice
         # ============================================================
         if status == "warning":
             advice = await get_warning_ai_advice(
@@ -938,7 +993,7 @@ async def create_warning(
             )
 
         # ============================================================
-        # 14. Save AI advice using SAME timestamp
+        # 15. Save AI advice using SAME timestamp
         # ============================================================
         ai_advice_doc = {
             "user_id": user_id,
@@ -956,7 +1011,7 @@ async def create_warning(
         ai_result = await ai_advice_collection.insert_one(ai_advice_doc)
 
         # ============================================================
-        # 15. Display AI result in CMD
+        # 16. Display AI result in CMD
         # ============================================================
         print()
         print("=" * 70)
@@ -989,7 +1044,7 @@ async def create_warning(
         print()
 
         # ============================================================
-        # 16. Return response
+        # 17. Return response
         # ============================================================
         return {
             "success": True,
@@ -1015,4 +1070,3 @@ async def create_warning(
             "message": "Failed to process sensor data",
             "error": str(e)
         }
-

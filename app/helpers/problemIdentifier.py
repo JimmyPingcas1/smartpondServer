@@ -22,9 +22,9 @@ def identify_problems(
         problems.append("pH level is high")
 
     # Turbidity
-    if turbidity < 25.0:
-        problems.append("Water is too clear")
-    elif turbidity > 35.0:
+    # if turbidity < 10.0:
+    #     problems.append("Water is too clear")
+    elif turbidity > 50.0:
         problems.append("Water is too cloudy")
 
     # Ammonia
