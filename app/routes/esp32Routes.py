@@ -288,6 +288,7 @@ async def automation_device_state(
         )
 
 
+
 # esp32 --- sends alert
 @router.post("/api/v1/warnings")
 async def create_warning(
@@ -744,9 +745,10 @@ async def create_warning(
             }
 
         # ============================================================
-        # 5. VERIFY ESP32 WARNING BEFORE DO ESTIMATION
+        # 5. VERIFY ESP32 WARNING/FIXED BEFORE DO ESTIMATION
         # ============================================================
-        if esp_status == "warning":
+
+        if esp_status in ["warning", "fixed"]:
 
             pond_sensor_data_safe = is_pond_sensor_data_safe(
                 temperature=temperature,
@@ -757,7 +759,7 @@ async def create_warning(
 
             print()
             print("=" * 70)
-            print("ESP32 WARNING VALIDATION")
+            print(f"ESP32 {esp_status.upper()} VALIDATION")
             print("=" * 70)
             print(f"ESP32 Status: {esp_status}")
             print(f"Temperature: {temperature}")
@@ -767,7 +769,10 @@ async def create_warning(
             print(f"Actual Sensor Data Safe: {pond_sensor_data_safe}")
             print("=" * 70)
 
-            if pond_sensor_data_safe:
+            # --------------------------------------------------------
+            # WARNING + ALL SENSOR VALUES SAFE
+            # --------------------------------------------------------
+            if esp_status == "warning" and pond_sensor_data_safe:
 
                 print("ESP32 SENT AN INVALID WARNING.")
                 print("All actual sensor readings are within the safe range.")
@@ -783,6 +788,38 @@ async def create_warning(
                     "message": (
                         "ESP32 warning ignored because the current "
                         "sensor readings are within the safe range."
+                    ),
+                    "status": "ignored",
+                    "issue_type": issue_type,
+                    "parameters": {
+                        "temperature": temperature,
+                        "ph": ph,
+                        "turbidity": turbidity,
+                        "ammonia": ammonia
+                    },
+                    "do_estimated": False,
+                    "ai_called": False
+                }
+
+            # --------------------------------------------------------
+            # FIXED + ANY SENSOR VALUE STILL UNSAFE
+            # --------------------------------------------------------
+            if esp_status == "fixed" and not pond_sensor_data_safe:
+
+                print("ESP32 SENT AN INVALID FIXED STATUS.")
+                print("At least one actual sensor reading is still unsafe.")
+                print("STOPPING PROCESSING BEFORE DO ESTIMATION.")
+                print("No DO estimation.")
+                print("No problem identification.")
+                print("No SMS.")
+                print("No database sensor record.")
+                print("No AI advice.")
+
+                return {
+                    "success": True,
+                    "message": (
+                        "ESP32 fixed message ignored because the current "
+                        "sensor readings are still outside the safe range."
                     ),
                     "status": "ignored",
                     "issue_type": issue_type,
@@ -1070,3 +1107,6 @@ async def create_warning(
             "message": "Failed to process sensor data",
             "error": str(e)
         }
+
+
+

@@ -28,7 +28,7 @@ def identify_problems(
         problems.append("Water is too cloudy")
 
     # Ammonia
-    if ammonia >= 0.2:
+    if ammonia >= 0.02:
         problems.append("Ammonia level is high")
 
     # Dissolved Oxygen

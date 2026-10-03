@@ -33,7 +33,7 @@ POND_SAFE_RANGES = {
         "max": 0.02,
     },
     "dissolved_oxygen": {
-        "min": 4.0,
+        "min": 5.0,
         "max": None,
     },
 }
