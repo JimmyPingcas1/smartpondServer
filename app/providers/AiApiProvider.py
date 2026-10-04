@@ -56,10 +56,11 @@ Do not include units.
 async def get_warning_ai_advice(
     temperature,
     turbidity,
-    ph,
+    ph, 
     ammonia,
     dissolved_oxygen,
     devices,
+    problems,
     question="",
     language="english"
 ):
@@ -67,6 +68,17 @@ async def get_warning_ai_advice(
     aerator = devices.get("aerator", False)
     waterpump = devices.get("waterpump", False)
     heater = devices.get("heater", False)
+
+    # ------------------------------------------------------------------
+    # The backend has already identified the water-quality problems.
+    # We only pass them to the AI as internal context so it can explain
+    # them — the AI must NOT re-classify the sensor readings on its own.
+    # ------------------------------------------------------------------
+    detected_problems = (
+        ", ".join(str(problem) for problem in problems)
+        if problems
+        else "None"
+    )
 
     prompt = f"""
 Analyze this fish pond water:
@@ -76,6 +88,9 @@ Turbidity: {turbidity} NTU
 pH: {ph}
 Ammonia: {ammonia} mg/L
 Dissolved Oxygen: {dissolved_oxygen} mg/L
+
+Detected water-quality problems from the SmartPond backend:
+{detected_problems}
 
 Safe ranges used by SmartPond:
 - Temperature: 25–30°C
@@ -99,7 +114,7 @@ Give a short recommendation for the fish farmer.
 
 Use exactly this format:
 
-Water condition:  State the water problem and include only the measured values of the parameters that are outside the safe range.
+Water condition: Give a short natural description of the current water condition using only the problems identified by the SmartPond backend and their actual measured values. Do not list the detected problems separately.
 Risk: Write one short sentence.
 Action: Write one short sentence.
 
@@ -108,11 +123,21 @@ Rules:
 - Use simple words that a fish farmer can easily understand.
 
 - Use the SmartPond safe ranges above specifically for hito fingerlings.
-- Compare each measured parameter with its corresponding safe range.
-- Include only parameters that are outside the safe range in the Water condition.
-- Always include the actual measured value of each problematic parameter.
-- Clearly state whether the parameter is too high or too low.
-- Do not mention parameters that are within the safe range.
+
+- The SmartPond backend has already identified the water-quality problems.
+- Treat the backend's detected water-quality problems as the authoritative problem list.
+- Use the detected problems as internal context when generating the Water condition, Risk, and Action.
+- Do not independently classify or reinterpret the sensor readings.
+- Do not add any water-quality problem that is not listed by the backend.
+- Do not remove any water-quality problem listed by the backend.
+- Do not output the detected problems as a separate list.
+- Do not number the detected problems.
+- Do not repeat the backend problem descriptions word-for-word.
+- Mention only problems identified by the backend.
+- When mentioning a problematic parameter, include its actual measured value.
+- Clearly state whether the problematic parameter is too high or too low when relevant.
+- Focus on giving useful advice rather than listing problems.
+
 - Base the Risk only on the detected water-quality problems.
 
 - Consider the current device status when giving the Action.
@@ -138,7 +163,11 @@ Rules:
                 "content": (
                     "You are SmartPond AI. "
                     "You provide simple fish pond water quality advice "
-                    "based on sensor readings and current device states."
+                    "based on the water-quality problems identified by the SmartPond backend, "
+                    "sensor readings, and current device states. "
+                    "The backend problem list is authoritative. "
+                    "Use the detected problems as internal context and do not output them "
+                    "as a separate list."
                 )
             },
             {

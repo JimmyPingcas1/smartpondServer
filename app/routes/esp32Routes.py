@@ -1124,6 +1124,7 @@ async def create_warning(
                 ammonia=ammonia,
                 dissolved_oxygen=dissolved_oxygen,
                 devices=devices,
+                problems=problems,
                 language="english"
             )
         else:
