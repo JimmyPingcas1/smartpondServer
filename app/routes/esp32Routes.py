@@ -10,7 +10,8 @@ from ..db import (
     pond_collection,
     sensors_collection,
     user_collection,
-    pondAutomation_collection
+    pondAutomation_collection,
+    warning_collection
 )
 from ..helpers.problemIdentifier import identify_problem, identify_problems
 from ..helpers.sensorValidator import validate_sensor_data
@@ -834,6 +835,112 @@ async def create_warning(
                 }
 
         # ============================================================
+        # 5.1 CHECK WARNING STATUS  ⬅⬅⬅ NEW
+        # ============================================================
+        # warning_status is used ONLY to prevent duplicate FIXED
+        # messages.
+        #
+        # It does NOT replace ai_advice_collection.
+        # ai_advice_collection will still save every valid
+        # warning/fixed event.
+        # ============================================================
+
+        # Make sure a warning_status document exists for this pond.
+        await warning_collection.update_one(
+            {
+                "user_id": user_id,
+                "pond_id": pond_id
+            },
+            {
+                "$setOnInsert": {
+                    "user_id": user_id,
+                    "pond_id": pond_id,
+                    "last_status": None,
+                    "created_at": app_now()
+                }
+            },
+            upsert=True
+        )
+
+        # ------------------------------------------------------------
+        # FIXED
+        # ------------------------------------------------------------
+        if esp_status == "fixed":
+
+            # Atomically change the state to fixed ONLY if the
+            # current state is NOT already fixed.
+            fixed_state_result = await warning_collection.update_one(
+                {
+                    "user_id": user_id,
+                    "pond_id": pond_id,
+                    "last_status": {
+                        "$ne": "fixed"
+                    }
+                },
+                {
+                    "$set": {
+                        "last_status": "fixed",
+                        "updated_at": app_now()
+                    }
+                }
+            )
+
+            # Another fixed request may have already changed the
+            # state to fixed.
+            if fixed_state_result.modified_count == 0:
+
+                print()
+                print("=" * 70)
+                print("DUPLICATE FIXED STATUS IGNORED")
+                print("=" * 70)
+                print(f"User ID: {user_id}")
+                print(f"Pond ID: {pond_id}")
+                print("Warning Status: fixed")
+                print("ESP32 Status: fixed")
+                print("No new sensor record.")
+                print("No new AI advice.")
+                print("No new SMS.")
+                print("=" * 70)
+
+                return {
+                    "success": True,
+                    "message": (
+                        "Fixed status already recorded. "
+                        "Duplicate ignored."
+                    ),
+                    "status": "ignored",
+                    "issue_type": issue_type,
+                    "parameters": {
+                        "temperature": temperature,
+                        "ph": ph,
+                        "turbidity": turbidity,
+                        "ammonia": ammonia
+                    },
+                    "do_estimated": False,
+                    "ai_called": False
+                }
+
+        # ------------------------------------------------------------
+        # WARNING
+        # ------------------------------------------------------------
+        elif esp_status == "warning":
+
+            # A new warning means the next fixed status should
+            # be allowed again.
+            await warning_collection.update_one(
+                {
+                    "user_id": user_id,
+                    "pond_id": pond_id
+                },
+                {
+                    "$set": {
+                        "last_status": "warning",
+                        "updated_at": app_now()
+                    }
+                }
+            )
+
+        # ============================================================
         # 6. MARK POND SENSOR STATUS AS TRUE (VALID READING)
         # ============================================================
         await pond_collection.update_one(
@@ -1108,5 +1215,6 @@ async def create_warning(
             "error": str(e)
         }
 
+        
 
 

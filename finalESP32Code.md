@@ -11,116 +11,116 @@
 #include <math.h>
 
 // ======================================================
-// ▼▼▼  USER CONFIGURATION — EDIT ONLY THIS SECTION  ▼▼▼
+// USER CONFIGURATION
 // ======================================================
 namespace CFG {
-
-  // ---- Wi-Fi ----
+  // Wi-Fi
   const char* WIFI_SSID     = "JEF.";
   const char* WIFI_PASSWORD = "12345678";
 
-  // ---- Account / Pond ----
+  // Account / Pond
   const char* USER_ID = "69a39acc56b522b28deec4a9";
   const char* POND_ID = "69a39f9cbb28dfc1b9a307fb";
 
-  // ---- Render server (hostname WITHOUT "https://") ----
+  // Server (no "https://")
   const char* HOST = "smartpond-server.onrender.com";
   const uint16_t PORT = 443;
 
-  // ---- Timing (ms) ----
+  // Timing (ms)
   const unsigned long WIFI_RECONNECT_INTERVAL = 5000;
   const unsigned long LIVE_SENSOR_INTERVAL    = 5000;
-  const unsigned long SENSOR_RECORD_INTERVAL  = 20UL * 60UL * 1000UL; // 20 min
+  const unsigned long SENSOR_RECORD_INTERVAL  = 20UL * 60UL * 1000UL;
 
-  // ---- Relay pins (active LOW) ----
+  // Relay pins (active LOW)
   const int PIN_PUMP_1  = 21;
   const int PIN_PUMP_2  = 19;
   const int PIN_AERATOR = 18;
   const int PIN_HEATER  = 17;
 
-  // ---- Sensor pins ----
+  // Sensor pins
   const int PIN_TEMP      = 32;
   const int PIN_PH        = 33;
   const int PIN_TURBIDITY = 35;
   const int PIN_MQ        = 34;
 
-  // ---- Water quality safe ranges (used for warnings) ----
+  // Manual-mode safe ranges
   const float TEMP_MIN = 25.0,  TEMP_MAX = 30.0;
   const float PH_MIN   = 6.5,   PH_MAX   = 7.5;
   const float NTU_MIN  = 10.0,  NTU_MAX  = 50.0;
   const float AMMONIA_MAX = 0.02;
 
-  // ---- Automation thresholds (with buffer/hysteresis) ----
-  const float HEATER_ON_BELOW    = 25.0;   // heater ON  if temp < 25
-  const float HEATER_OFF_ABOVE   = 26.0;   // heater OFF if temp >= 26
-  const float PUMP_ON_ABOVE_NTU  = 50.0;   // pump ON   if turbidity > 50
-  const float PUMP_OFF_BELOW_NTU = 45.0;   // pump OFF  if turbidity <= 45
-  const float PUMP_ON_ABOVE_NH3  = 0.02;   // pump ON   if ammonia > 0.02
-  const float PUMP_OFF_BELOW_NH3 = 0.017;  // pump OFF  if ammonia <= 0.017
+  // Automation thresholds (hysteresis)
+  const float HEATER_ON_BELOW    = 25.0;
+  const float HEATER_OFF_ABOVE   = 26.0;
+  const float PUMP_ON_ABOVE_NTU  = 50.0;
+  const float PUMP_OFF_BELOW_NTU = 45.0;
+  const float PUMP_ON_ABOVE_NH3  = 0.02;
+  const float PUMP_OFF_BELOW_NH3 = 0.017;
+}
 
-} // namespace CFG
-
-// ======================================================
-// SHORTCUTS
-// ======================================================
 #define RELAY_ON  LOW
 #define RELAY_OFF HIGH
-#define VREF      3.3
-#define ADC_RES   4095.0
 
 // ======================================================
-// WEBSOCKETS
+// GLOBALS
 // ======================================================
-WebSocketsClient webSocket;          // auto-control
-WebSocketsClient sensorWebSocket;    // live sensor data
+WebSocketsClient webSocket;        // auto-control
+WebSocketsClient sensorWebSocket;  // live sensor data
 bool wsConnected       = false;
 bool sensorWsConnected = false;
 
-// ======================================================
-// STATE
-// ======================================================
 bool aeratorOn    = false;
 bool waterpumpOn  = false;
 bool heaterOn     = false;
 bool automationOn = false;
 
-// Pending automation POSTs, one entry per device
+// Pending automation POSTs (one per device)
 const char* pendingDevices[] = {"aerator", "waterpump", "heater"};
 bool pendingAutomationPost[3] = {false, false, false};
 bool pendingState[3] = {false, false, false};
 unsigned long pendingPostTime[3] = {0, 0, 0};
 
-// Sensors
+// Sensor values
 float temperature = 0, phLevel = 0, turbidity = 0, ammonia = 0;
 bool  tempValid = false, phValid = false,
       turbidityValid = false, ammoniaValid = false;
 
-// Error tracking
+// Sensor-error tracking
 bool prevTempValid = true, prevPhValid = true,
      prevTurbidityValid = true, prevAmmoniaValid = true;
 bool sensorErrorActive = false;
 
-// Water quality warning tracking
+// Warning tracking (shared by automation + manual modes)
 bool temperatureWarningActive = false;
-bool phWarningActive = false;
-bool turbidityWarningActive = false;
-bool ammoniaWarningActive = false;
+bool turbidityWarningActive   = false;
+bool ammoniaWarningActive     = false;
+bool lastTemperatureWarning   = false;
+bool lastTurbidityWarning     = false;
+bool lastAmmoniaWarning       = false;
+bool warningStateInitialized  = false;
 
-// Smoothing
+// ⬇⬇⬇ NEW: Fixed confirmation retry
+bool fixedRetryActive = false;
+int fixedRetryCount = 0;
+unsigned long lastFixedRetryTime = 0;
+
+const int FIXED_RETRY_MAX = 3;
+const unsigned long FIXED_RETRY_INTERVAL = 8000;
+
+// Sensor smoothing
 float smoothPH = 0, smoothNTU = 0;
 
 // Timers
 unsigned long lastWiFiReconnectAttempt = 0;
 unsigned long lastLiveSensorSend       = 0;
 unsigned long lastSensorRecord         = 0;
-bool          firstSensorRecord        = true;
 bool          wasWiFiConnected         = false;
 
 // DS18B20
 OneWire         oneWire(CFG::PIN_TEMP);
 DallasTemperature ds18b20(&oneWire);
 
-// URLs
+// Endpoints
 String automationDeviceStateUrl =
     "https://" + String(CFG::HOST) + "/api/v1/AutomationDeviceState";
 String warningsUrl =
@@ -128,9 +128,7 @@ String warningsUrl =
 String sensorAutoUrl =
     "https://" + String(CFG::HOST) + "/api/v1/sensor-auto";
 
-// ======================================================
-// FORWARD DECLARATIONS
-// ======================================================
+// Forward declarations
 void setDeviceRelay(const char* device, bool state, bool fromAutomation);
 bool postAutomationDeviceState(const char* device, bool state);
 
@@ -145,7 +143,6 @@ float readPH() {
 
   float v = (raw / 4095.0) * 3.3;
   float targetPH = 7.0;
-
   if (v >= 1.847) {
     if (v >= 2.500)
       targetPH = 6.86 - ((v - 1.847) * ((6.86 - 4.01) / (2.928 - 1.847)));
@@ -169,7 +166,6 @@ float readTurbidity() {
 
   float v = (raw / 4095.0) * 3.3;
   float ntu = 0.0;
-
   if (v >= 1.265) {
     ntu = (1.311 - v) * (20.0 / (1.311 - 1.265));
     if (ntu < 0.0) ntu = 0.0;
@@ -260,21 +256,21 @@ void setDeviceRelay(const char* device, bool state, bool fromAutomation = false)
     heaterOn = state;
     digitalWrite(CFG::PIN_HEATER, state ? RELAY_ON : RELAY_OFF);
   }
+
   Serial.printf("%s: %s\n",
                 strcmp(device,"waterpump")==0 ? "WATER PUMP" :
                 strcmp(device,"aerator")  ==0 ? "AERATOR"    : "HEATER",
                 state ? "ON" : "OFF");
 
   if (fromAutomation && automationOn) {
-    int deviceIndex = -1;
-    if (strcmp(device, "aerator") == 0) deviceIndex = 0;
-    else if (strcmp(device, "waterpump") == 0) deviceIndex = 1;
-    else if (strcmp(device, "heater") == 0) deviceIndex = 2;
-
-    if (deviceIndex >= 0) {
-      pendingAutomationPost[deviceIndex] = true;
-      pendingState[deviceIndex] = state;
-      pendingPostTime[deviceIndex] = millis();
+    int idx = -1;
+    if (strcmp(device, "aerator")   == 0) idx = 0;
+    if (strcmp(device, "waterpump") == 0) idx = 1;
+    if (strcmp(device, "heater")    == 0) idx = 2;
+    if (idx >= 0) {
+      pendingAutomationPost[idx] = true;
+      pendingState[idx]          = state;
+      pendingPostTime[idx]       = millis();
     }
     Serial.printf("[AUTO] Queued DB update: %s -> %s\n", device, state ? "ON" : "OFF");
   }
@@ -289,7 +285,7 @@ void stopAutomationDevices() {
 }
 
 // ======================================================
-// HTTP POST HELPERS
+// HTTP HELPERS
 // ======================================================
 bool httpPostJSON(const String& url, const String& body, const char* tag) {
   if (WiFi.status() != WL_CONNECTED) {
@@ -330,7 +326,6 @@ String warningsEndpoint() {
 // ======================================================
 bool sendSensorErrorToServer() {
   StaticJsonDocument<1024> doc;
-
   doc["status"]        = "sensor_error";
   doc["issue_type"]    = "sensor_error";
   doc["sensor_status"] = false;
@@ -369,15 +364,12 @@ bool sendSensorRecoveryToServer() {
 }
 
 // ======================================================
-// WATER QUALITY WARNING / FIXED
+// WATER QUALITY WARNING STATE POST
 // ======================================================
-bool sendWaterQualityWarning(const char* sensor, float value, const char* message) {
-  StaticJsonDocument<768> doc;
-  doc["status"]        = "warning";
+bool sendAutomationWarningState(const char* status) {
+  StaticJsonDocument<1024> doc;
+  doc["status"]        = status;
   doc["issue_type"]    = "water_quality";
-  doc["sensor"]        = sensor;
-  doc["value"]         = value;
-  doc["message"]       = message;
   doc["sensor_status"] = true;
 
   JsonObject s = doc.createNestedObject("sensors");
@@ -387,30 +379,125 @@ bool sendWaterQualityWarning(const char* sensor, float value, const char* messag
   s["ammonia"]     = ammoniaValid   ? ammonia     : 0.0;
 
   String body; serializeJson(doc, body);
-  return httpPostJSON(warningsEndpoint(), body, "WATER QUALITY WARNING");
-}
 
-bool sendWaterQualityFixed(const char* sensor, float value, const char* message) {
-  StaticJsonDocument<768> doc;
-  doc["status"]        = "fixed";
-  doc["issue_type"]    = "water_quality";
-  doc["sensor"]        = sensor;
-  doc["value"]         = value;
-  doc["message"]       = message;
-  doc["sensor_status"] = true;
+  Serial.println("\n================================");
+  Serial.printf("[WARNING STATE] %s\n", status);
+  Serial.println("================================");
+  Serial.println(body);
 
-  JsonObject s = doc.createNestedObject("sensors");
-  s["temperature"] = tempValid      ? temperature : 0.0;
-  s["ph"]          = phValid        ? phLevel     : 0.0;
-  s["turbidity"]   = turbidityValid ? turbidity   : 0.0;
-  s["ammonia"]     = ammoniaValid   ? ammonia     : 0.0;
-
-  String body; serializeJson(doc, body);
-  return httpPostJSON(warningsEndpoint(), body, "WATER QUALITY FIXED");
+  return httpPostJSON(warningsEndpoint(), body, "AUTOMATION WARNING");
 }
 
 // ======================================================
-// AUTOMATION STATE POST (queued)
+// ⬇⬇⬇ NEW: FIXED CONFIRMATION RETRY
+// ======================================================
+
+// Start the retry sequence. First FIXED goes out immediately,
+// then two more will be sent 8 s apart by processFixedConfirmationRetry().
+void startFixedConfirmation() {
+
+  // Don't restart if a retry sequence is already in progress
+  if (fixedRetryActive) return;
+
+  fixedRetryActive = true;
+  fixedRetryCount  = 0;
+
+  // Attempt 1 — sent immediately with current values
+  fixedRetryCount++;
+
+  Serial.println();
+  Serial.println("================================");
+  Serial.println("[FIXED CONFIRMATION]");
+  Serial.println("Attempt 1/3");
+  Serial.printf("Temperature: %.2f C\n", temperature);
+  Serial.printf("pH: %.2f\n", phLevel);
+  Serial.printf("Turbidity: %.2f NTU\n", turbidity);
+  Serial.printf("Ammonia: %.4f PPM\n", ammonia);
+  Serial.println("Sending FIXED...");
+  Serial.println("================================");
+
+  bool sent = sendAutomationWarningState("fixed");
+  Serial.println(sent
+    ? "[FIXED] Attempt 1 sent successfully."
+    : "[FIXED] Attempt 1 failed. Retry will continue.");
+
+  lastFixedRetryTime = millis();
+
+  if (FIXED_RETRY_MAX <= 1) {
+    fixedRetryActive = false;
+  }
+}
+
+// Non-blocking retry driver. Call this from loop().
+void processFixedConfirmationRetry() {
+
+  if (!fixedRetryActive) return;
+  if (millis() - lastFixedRetryTime < FIXED_RETRY_INTERVAL) return;
+
+  // Already reached the limit
+  if (fixedRetryCount >= FIXED_RETRY_MAX) {
+    fixedRetryActive = false;
+    Serial.println();
+    Serial.println("================================");
+    Serial.println("[FIXED RETRY] Finished");
+    Serial.println("================================");
+    return;
+  }
+
+  // Refresh sensor values for the next attempt
+  readSensors();
+
+  // Skip this attempt if any sensor is invalid
+  if (!tempValid || !phValid || !turbidityValid || !ammoniaValid) {
+    Serial.println();
+    Serial.println("================================");
+    Serial.println("[FIXED RETRY] Sensor invalid");
+    Serial.println("FIXED attempt postponed.");
+    Serial.println("================================");
+    lastFixedRetryTime = millis();
+    return;
+  }
+
+  fixedRetryCount++;
+
+  Serial.println();
+  Serial.println("================================");
+  Serial.printf("[FIXED RETRY] Attempt %d/%d\n",
+                fixedRetryCount, FIXED_RETRY_MAX);
+  Serial.printf("Temperature: %.2f C\n", temperature);
+  Serial.printf("pH: %.2f\n", phLevel);
+  Serial.printf("Turbidity: %.2f NTU\n", turbidity);
+  Serial.printf("Ammonia: %.4f PPM\n", ammonia);
+  Serial.println("Sending FIXED...");
+  Serial.println("================================");
+
+  bool sent = sendAutomationWarningState("fixed");
+  Serial.printf("[FIXED RETRY] Attempt %d %s.\n",
+                fixedRetryCount,
+                sent ? "sent successfully" : "failed to send");
+
+  lastFixedRetryTime = millis();
+
+  if (fixedRetryCount >= FIXED_RETRY_MAX) {
+    fixedRetryActive = false;
+    Serial.println();
+    Serial.println("================================");
+    Serial.println("[FIXED RETRY] 3 attempts completed");
+    Serial.println("================================");
+  }
+}
+
+// Cancel any in-flight fixed retry (used when a new warning appears)
+void cancelFixedRetry() {
+  if (fixedRetryActive) {
+    Serial.println("[FIXED RETRY] Cancelled due to new WARNING.");
+    fixedRetryActive = false;
+    fixedRetryCount  = 0;
+  }
+}
+
+// ======================================================
+// AUTOMATION DEVICE STATE POST (queued)
 // ======================================================
 bool postAutomationDeviceState(const char* device, bool state) {
   if (WiFi.status() != WL_CONNECTED) return false;
@@ -439,31 +526,28 @@ bool postAutomationDeviceState(const char* device, bool state) {
 void processPendingAutomationPost() {
   if (WiFi.status() != WL_CONNECTED) return;
 
-  for (int deviceIndex = 0; deviceIndex < 3; deviceIndex++) {
-    if (!pendingAutomationPost[deviceIndex]) continue;
-    if (millis() - pendingPostTime[deviceIndex] < 100) continue;
+  for (int i = 0; i < 3; i++) {
+    if (!pendingAutomationPost[i]) continue;
+    if (millis() - pendingPostTime[i] < 100) continue;
 
-    const char* device = pendingDevices[deviceIndex];
-    bool state = pendingState[deviceIndex];
+    const char* device = pendingDevices[i];
+    bool state = pendingState[i];
 
     Serial.printf("[AUTO] Processing DB update: %s -> %s\n",
                   device, state ? "ON" : "OFF");
 
-    bool success = postAutomationDeviceState(device, state);
-
-    if (success) {
-      pendingAutomationPost[deviceIndex] = false;
+    if (postAutomationDeviceState(device, state)) {
+      pendingAutomationPost[i] = false;
       Serial.println("[AUTO] DB update successful.");
     } else {
       Serial.println("[AUTO] DB update failed - keeping POST pending.");
     }
-
     break;
   }
 }
 
 // ======================================================
-// SENSOR DATA RECORDING (20 min)
+// SENSOR DATA RECORDING (every 20 min)
 // ======================================================
 bool postSensorData() {
   if (WiFi.status() != WL_CONNECTED) {
@@ -486,7 +570,7 @@ bool postSensorData() {
 }
 
 // ======================================================
-// LIVE SENSOR (WebSocket, 5 s)
+// LIVE SENSOR (WebSocket, every 5 s)
 // ======================================================
 void sendLiveSensorData() {
   if (!sensorWsConnected) {
@@ -508,7 +592,7 @@ void sendLiveSensorData() {
 }
 
 // ======================================================
-// CHECKS
+// SENSOR ERROR CHECK
 // ======================================================
 void checkSensorErrors() {
   bool anyFail = !tempValid || !phValid || !turbidityValid || !ammoniaValid;
@@ -543,67 +627,157 @@ void checkSensorErrors() {
   prevTurbidityValid = turbidityValid; prevAmmoniaValid = ammoniaValid;
 }
 
+// ======================================================
+// WATER QUALITY WARNING CHECK
+//   - Automation ON  → automation hysteresis thresholds
+//   - Automation OFF → manual safe ranges
+// ======================================================
 void checkWaterQualityWarnings() {
 
-  // Temperature
+  // ---------- AUTOMATION OFF (manual safe ranges) ----------
+  if (!automationOn) {
+    if (!tempValid || !phValid || !turbidityValid || !ammoniaValid) return;
+
+    bool temperatureSafe = temperature >= CFG::TEMP_MIN && temperature <= CFG::TEMP_MAX;
+    bool phSafe          = phLevel     >= CFG::PH_MIN   && phLevel     <= CFG::PH_MAX;
+    bool turbiditySafe   = turbidity   >= CFG::NTU_MIN  && turbidity   <= CFG::NTU_MAX;
+    bool ammoniaSafe     = ammonia     >= 0.0           && ammonia     <= CFG::AMMONIA_MAX;
+
+    bool waterQualitySafe = temperatureSafe && phSafe && turbiditySafe && ammoniaSafe;
+
+    // First evaluation after ON->OFF transition: send immediately
+    if (!warningStateInitialized) {
+      Serial.println("\n================================");
+      Serial.println("[MANUAL WARNING STATE]");
+      Serial.println("================================");
+      Serial.printf("Temperature: %.2f C | %s\n", temperature, temperatureSafe ? "SAFE" : "WARNING");
+      Serial.printf("pH: %.2f | %s\n",          phLevel,     phSafe          ? "SAFE" : "WARNING");
+      Serial.printf("Turbidity: %.2f NTU | %s\n", turbidity, turbiditySafe   ? "SAFE" : "WARNING");
+      Serial.printf("Ammonia: %.4f PPM | %s\n",  ammonia,    ammoniaSafe     ? "SAFE" : "WARNING");
+
+      // ⬇⬇⬇ NEW logic: use retry for FIXED, direct warning otherwise
+      if (waterQualitySafe) {
+        startFixedConfirmation();
+      } else {
+        cancelFixedRetry();
+        if (sendAutomationWarningState("warning")) {
+          Serial.println("[MANUAL] Initial WARNING sent.");
+        } else {
+          Serial.println("[MANUAL] Failed to send initial WARNING.");
+        }
+      }
+
+      temperatureWarningActive = !temperatureSafe;
+      turbidityWarningActive   = !turbiditySafe;
+      ammoniaWarningActive     = !ammoniaSafe;
+
+      lastTemperatureWarning   = !temperatureSafe;
+      lastTurbidityWarning     = !turbiditySafe;
+      lastAmmoniaWarning       = !ammoniaSafe;
+
+      warningStateInitialized  = true;
+      return;
+    }
+
+    bool previousAnyWarning = lastTemperatureWarning || lastTurbidityWarning || lastAmmoniaWarning;
+    bool currentAnyWarning  = !waterQualitySafe;
+    if (currentAnyWarning == previousAnyWarning) return;
+
+    Serial.println("\n================================\n[MANUAL WARNING STATE CHANGED]\n================================");
+
+    // ⬇⬇⬇ NEW logic
+    if (waterQualitySafe) {
+      // All safe → begin 3× fixed confirmation
+      startFixedConfirmation();
+    } else {
+      // Regression → cancel any pending fixed retry and send warning
+      cancelFixedRetry();
+      if (sendAutomationWarningState("warning")) {
+        Serial.println("[MANUAL] Water-quality WARNING sent.");
+      } else {
+        Serial.println("[MANUAL] Failed to send WARNING. Will retry.");
+      }
+    }
+
+    lastTemperatureWarning = !temperatureSafe;
+    lastTurbidityWarning   = !turbiditySafe;
+    lastAmmoniaWarning     = !ammoniaSafe;
+    return;
+  }
+
+  // ---------- AUTOMATION ON (hysteresis) ----------
+  bool currentTemperatureWarning = false;
+  bool currentTurbidityWarning   = false;
+  bool currentAmmoniaWarning     = false;
+
   if (tempValid) {
-    bool bad = (temperature < CFG::TEMP_MIN || temperature > CFG::TEMP_MAX);
-    if (bad && !temperatureWarningActive) {
-      sendWaterQualityWarning("temperature", temperature,
-        "Temperature is outside the safe range of 25-30 C.");
-      temperatureWarningActive = true;
-    } else if (!bad && temperatureWarningActive) {
-      sendWaterQualityFixed("temperature", temperature,
-        "Temperature returned to the safe range.");
-      temperatureWarningActive = false;
-    }
+    if (temperatureWarningActive)
+      currentTemperatureWarning = !(temperature >= CFG::HEATER_OFF_ABOVE);
+    else
+      currentTemperatureWarning = (temperature < CFG::HEATER_ON_BELOW);
   }
 
-  // pH
-  if (phValid) {
-    bool bad = (phLevel < CFG::PH_MIN || phLevel > CFG::PH_MAX);
-    if (bad && !phWarningActive) {
-      sendWaterQualityWarning("ph", phLevel,
-        "pH is outside the safe range of 6.5-7.5.");
-      phWarningActive = true;
-    } else if (!bad && phWarningActive) {
-      sendWaterQualityFixed("ph", phLevel,
-        "pH returned to the safe range.");
-      phWarningActive = false;
-    }
-  }
-
-  // Turbidity
   if (turbidityValid) {
-    bool bad = (turbidity < CFG::NTU_MIN || turbidity > CFG::NTU_MAX);
-    if (bad && !turbidityWarningActive) {
-      sendWaterQualityWarning("turbidity", turbidity,
-        "Turbidity is outside the safe range of 10-50 NTU.");
-      turbidityWarningActive = true;
-    } else if (!bad && turbidityWarningActive) {
-      sendWaterQualityFixed("turbidity", turbidity,
-        "Turbidity returned to the safe range.");
-      turbidityWarningActive = false;
-    }
+    if (turbidityWarningActive)
+      currentTurbidityWarning = !(turbidity <= CFG::PUMP_OFF_BELOW_NTU);
+    else
+      currentTurbidityWarning = (turbidity > CFG::PUMP_ON_ABOVE_NTU);
   }
 
-  // Ammonia
   if (ammoniaValid) {
-    bool bad = (ammonia > CFG::AMMONIA_MAX);
-    if (bad && !ammoniaWarningActive) {
-      sendWaterQualityWarning("ammonia", ammonia,
-        "Ammonia is above the safe limit of 0.02 PPM.");
-      ammoniaWarningActive = true;
-    } else if (!bad && ammoniaWarningActive) {
-      sendWaterQualityFixed("ammonia", ammonia,
-        "Ammonia returned to the safe range.");
-      ammoniaWarningActive = false;
+    if (ammoniaWarningActive)
+      currentAmmoniaWarning = !(ammonia <= CFG::PUMP_OFF_BELOW_NH3);
+    else
+      currentAmmoniaWarning = (ammonia > CFG::PUMP_ON_ABOVE_NH3);
+  }
+
+  bool stateChanged =
+    !warningStateInitialized ||
+    currentTemperatureWarning != lastTemperatureWarning ||
+    currentTurbidityWarning   != lastTurbidityWarning ||
+    currentAmmoniaWarning     != lastAmmoniaWarning;
+
+  temperatureWarningActive = currentTemperatureWarning;
+  turbidityWarningActive   = currentTurbidityWarning;
+  ammoniaWarningActive     = currentAmmoniaWarning;
+
+  if (!stateChanged) return;
+
+  bool anyWarning =
+    temperatureWarningActive || turbidityWarningActive || ammoniaWarningActive;
+
+  // ⬇⬇⬇ NEW logic
+  if (anyWarning) {
+
+    // Regression → cancel any pending fixed retry
+    cancelFixedRetry();
+
+    if (sendAutomationWarningState("warning")) {
+      lastTemperatureWarning = temperatureWarningActive;
+      lastTurbidityWarning   = turbidityWarningActive;
+      lastAmmoniaWarning     = ammoniaWarningActive;
+      warningStateInitialized = true;
+      Serial.println("[AUTOMATION] Current water quality has active problem(s).");
+    } else {
+      Serial.println("[AUTOMATION] Failed to send warning state. State will be retried.");
     }
+
+  } else {
+
+    // All clear → begin 3× fixed confirmation
+    startFixedConfirmation();
+
+    lastTemperatureWarning = temperatureWarningActive;
+    lastTurbidityWarning   = turbidityWarningActive;
+    lastAmmoniaWarning     = ammoniaWarningActive;
+    warningStateInitialized = true;
+
+    Serial.println("[AUTOMATION] All automation water-quality problems are fixed.");
   }
 }
 
 // ======================================================
-// AUTOMATION
+// AUTOMATION RULES
 // ======================================================
 void runAutomationRules() {
   if (!automationOn) return;
@@ -617,19 +791,14 @@ void runAutomationRules() {
     return;
   }
 
-  // HEATER - TEMPERATURE
-  if (temperature < CFG::HEATER_ON_BELOW) {
-    setDeviceRelay("heater", true, true);
-  }
-  else if (temperature >= CFG::HEATER_OFF_ABOVE) {
-    setDeviceRelay("heater", false, true);
-  }
+  // Heater — temperature
+  if (temperature < CFG::HEATER_ON_BELOW)         setDeviceRelay("heater", true,  true);
+  else if (temperature >= CFG::HEATER_OFF_ABOVE)  setDeviceRelay("heater", false, true);
 
-  // WATER PUMP - TURBIDITY / AMMONIA
+  // Water pump — turbidity / ammonia
   if (turbidity > CFG::PUMP_ON_ABOVE_NTU || ammonia > CFG::PUMP_ON_ABOVE_NH3) {
     setDeviceRelay("waterpump", true, true);
-  }
-  else if (turbidity <= CFG::PUMP_OFF_BELOW_NTU && ammonia <= CFG::PUMP_OFF_BELOW_NH3) {
+  } else if (turbidity <= CFG::PUMP_OFF_BELOW_NTU && ammonia <= CFG::PUMP_OFF_BELOW_NH3) {
     setDeviceRelay("waterpump", false, true);
   }
 }
@@ -673,7 +842,6 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
         Serial.println("[WS] JSON ERROR");
         break;
       }
-
       const char* t = doc["type"] | "";
 
       if (strcmp(t, "automation_state") == 0 || strcmp(t, "automation") == 0) {
@@ -681,6 +849,25 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
         automationOn = doc["automation"] | false;
         Serial.printf("[AUTO] State: %s -> %s\n",
                       prev ? "ON" : "OFF", automationOn ? "ON" : "OFF");
+
+        // ON->OFF or OFF->ON: reset warning tracking so a fresh evaluation runs
+        if (prev != automationOn) {
+          Serial.println(prev
+            ? "[AUTO] Automation OFF → switching to manual evaluation."
+            : "[AUTO] Automation ON  → switching to hysteresis evaluation.");
+
+          warningStateInitialized  = false;
+          temperatureWarningActive = false;
+          turbidityWarningActive   = false;
+          ammoniaWarningActive     = false;
+          lastTemperatureWarning   = false;
+          lastTurbidityWarning     = false;
+          lastAmmoniaWarning       = false;
+
+          // ⬇⬇⬇ NEW: cancel any in-flight fixed retry on mode change
+          cancelFixedRetry();
+        }
+
         if (doc.containsKey("devices"))
           applyDeviceStates(doc["devices"].as<JsonObject>());
       }
@@ -733,7 +920,6 @@ void sensorWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
       sensorWsConnected = true;
       Serial.print("[LIVE WS] Server: ");
       Serial.println((char*)payload);
-
       lastLiveSensorSend = millis() - CFG::LIVE_SENSOR_INTERVAL;
       break;
 
@@ -860,7 +1046,7 @@ void setup() {
   digitalWrite(CFG::PIN_HEATER,  RELAY_OFF);
   Serial.println("Relays OFF: Pump(21/19) Aerator(18) Heater(17)");
 
-  // ADC — analogSetPinAttenuation configures the pin mode automatically without overriding the 11dB range
+  // ADC (11 dB range for 0–3.3 V)
   analogReadResolution(12);
   analogSetPinAttenuation(CFG::PIN_PH,        ADC_11db);
   analogSetPinAttenuation(CFG::PIN_TURBIDITY, ADC_11db);
@@ -872,8 +1058,7 @@ void setup() {
   scanWiFi();
   if (connectToWiFi()) wasWiFiConnected = true;
   else {
-    Serial.println("[WIFI] Initial connection failed.");
-    Serial.println("[WIFI] Will continue trying in the background.");
+    Serial.println("[WIFI] Initial connection failed. Will keep retrying.");
   }
 
   connectWebSocket();
@@ -890,8 +1075,9 @@ void loop() {
   webSocket.loop();
   sensorWebSocket.loop();
   processPendingAutomationPost();
+  processFixedConfirmationRetry();  // ⬅⬅⬅ NEW
 
-  // ---- Sensors + safety every 2 s ----
+  // Sensors + safety every 2 s
   static unsigned long lastSensorRead = 0;
   if (millis() - lastSensorRead >= 2000) {
     lastSensorRead = millis();
@@ -915,14 +1101,14 @@ void loop() {
     }
   }
 
-  // ---- Live WebSocket every 5 s ----
+  // Live WebSocket every 5 s
   if (sensorWsConnected &&
       millis() - lastLiveSensorSend >= CFG::LIVE_SENSOR_INTERVAL) {
     lastLiveSensorSend = millis();
     sendLiveSensorData();
   }
 
-  // ---- DB recording every 20 min ----
+  // DB recording every 20 min
   if (millis() - lastSensorRecord >= CFG::SENSOR_RECORD_INTERVAL) {
     lastSensorRecord = millis();
     Serial.println("\n================================\n[RECORD] Saving sensor data\n================================");
@@ -931,3 +1117,4 @@ void loop() {
 
   delay(5);
 }
+
